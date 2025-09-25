@@ -9,13 +9,14 @@ based on their scheduled start times.
 import os
 import logging
 import asyncio
-from datetime import datetime, timezone
-from typing import List, Optional
+from datetime import datetime, timezone, timedelta
+from typing import List
 
 import discord
 from discord.ext import commands
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.date import DateTrigger
+from apscheduler.events import EVENT_JOB_EXECUTED, EVENT_JOB_ERROR
 from dotenv import load_dotenv
 
 # Load environment variables
@@ -41,7 +42,8 @@ class VoiceEventBot(commands.Bot):
             help_command=None
         )
 
-        self.scheduler = AsyncIOScheduler()
+        # Initialize scheduler with current event loop
+        self.scheduler = None  # Will be set in setup_hook
         self.guild_id = int(os.getenv('GUILD_ID'))
 
         # Register slash commands
@@ -54,8 +56,18 @@ class VoiceEventBot(commands.Bot):
         """Called when the bot is starting up"""
         logger.info("Setting up voice event automation...")
 
+        # Initialize scheduler with current event loop
+        import asyncio
+        loop = asyncio.get_running_loop()
+        self.scheduler = AsyncIOScheduler(event_loop=loop)
+
+        # Add event listeners for debugging
+        self.scheduler.add_listener(self._job_executed, EVENT_JOB_EXECUTED)
+        self.scheduler.add_listener(self._job_error, EVENT_JOB_ERROR)
+
         # Start scheduler
         self.scheduler.start()
+        logger.info("Scheduler started with event loop")
 
         # Sync slash commands
         await self.tree.sync()
@@ -82,16 +94,12 @@ class VoiceEventBot(commands.Bot):
             return []
 
         voice_events = []
-        now = datetime.now(timezone.utc)
 
         for event in guild.scheduled_events:
             # Only process scheduled events (not active/completed)
             if event.status != discord.EventStatus.scheduled:
                 continue
 
-            # Only process future events
-            if event.start_time <= now:
-                continue
 
             # Only process voice/stage channel events
             if event.entity_type in [
@@ -102,6 +110,38 @@ class VoiceEventBot(commands.Bot):
 
         return voice_events
 
+    async def end_conflicting_voice_events(self, new_event_channel_id: int):
+        """End all active voice events in the same channel as the new event"""
+        guild = self.get_guild(self.guild_id)
+        if not guild:
+            logger.error(f"Guild {self.guild_id} not found")
+            return
+
+        for event in guild.scheduled_events:
+            # Only check active events
+            if event.status != discord.EventStatus.active:
+                continue
+
+            # Only check voice/stage events
+            if event.entity_type not in [
+                discord.EntityType.voice,
+                discord.EntityType.stage_instance
+            ]:
+                continue
+
+            # Check if it's in the same channel
+            if event.channel and event.channel.id == new_event_channel_id:
+                try:
+                    logger.info(f"🛑 Ending conflicting event in same channel: {event.name}")
+                    await event.end()
+                    logger.info(f"✅ Successfully ended conflicting event: {event.name}")
+                except discord.Forbidden as e:
+                    logger.error(f"❌ No permission to end event {event.name}: {e}")
+                except discord.HTTPException as e:
+                    logger.error(f"❌ HTTP error ending event {event.name}: {e}")
+                except Exception as e:
+                    logger.error(f"❌ Unexpected error ending event {event.name}: {e}")
+
     async def sync_voice_events(self) -> int:
         """Sync all voice events and create cron jobs"""
         # Clear existing jobs
@@ -109,20 +149,23 @@ class VoiceEventBot(commands.Bot):
 
         voice_events = await self.get_voice_events()
         scheduled_count = 0
-
+        now = datetime.now(timezone.utc)
         for event in voice_events:
             try:
-                # Schedule job for event start time
+                # Schedule job for event start time - direct async call
+                start_time = event.start_time
+                if event.start_time <= now:
+                    start_time = now + timedelta(seconds=60)  # Start in 60 seconds if past
                 self.scheduler.add_job(
                     self.start_voice_event,
-                    DateTrigger(run_date=event.start_time),
+                    DateTrigger(run_date=start_time),
                     args=[event.id],
                     id=f"event_{event.id}",
                     replace_existing=True
                 )
 
                 logger.info(
-                    f"Scheduled: {event.name} at {event.start_time} "
+                    f"Scheduled: {event.name} at {start_time} "
                     f"(Channel: {event.channel.name if event.channel else 'Unknown'})"
                 )
                 scheduled_count += 1
@@ -132,6 +175,15 @@ class VoiceEventBot(commands.Bot):
 
         logger.info(f"Synced {scheduled_count} voice events")
         return scheduled_count
+
+    def _job_executed(self, event):
+        """Scheduler job executed listener"""
+        logger.info(f"🎯 Job executed: {event.job_id}, return value: {event.retval}")
+
+    def _job_error(self, event):
+        """Scheduler job error listener"""
+        logger.error(f"💥 Job error: {event.job_id}, exception: {event.exception}")
+        logger.error(f"Traceback: {event.traceback}")
 
     async def start_voice_event(self, event_id: int):
         """Start a specific voice event"""
@@ -155,6 +207,10 @@ class VoiceEventBot(commands.Bot):
                 logger.info(f"⚠️ Event '{event.name}' is already active")
                 return
 
+            # End any conflicting events in the same channel first
+            if event.channel:
+                await self.end_conflicting_voice_events(event.channel.id)
+
             # Start the event
             logger.info(f"🚀 Starting event: {event.name}")
             await event.start()
@@ -172,22 +228,6 @@ class VoiceEventBot(commands.Bot):
     # Slash Commands
     async def sync_events_command(self, interaction: discord.Interaction):
         """Slash command to sync events"""
-        # Check permissions - need to get from guild member, not user
-        if not interaction.guild:
-            await interaction.response.send_message(
-                "❌ This command can only be used in a server.",
-                ephemeral=True
-            )
-            return
-
-        member = interaction.guild.get_member(interaction.user.id)
-        # Temporarily disable permission check for testing
-        # if not member or not member.guild_permissions.manage_events:
-        #     await interaction.response.send_message(
-        #         "❌ You need 'Manage Events' permission to use this command.",
-        #         ephemeral=True
-        #     )
-        #     return
 
         await interaction.response.defer()
 
@@ -271,22 +311,6 @@ class VoiceEventBot(commands.Bot):
 
     async def start_event_command(self, interaction: discord.Interaction, event_id: str):
         """Manually start an event"""
-        # Check permissions
-        if not interaction.guild:
-            await interaction.response.send_message(
-                "❌ This command can only be used in a server.",
-                ephemeral=True
-            )
-            return
-
-        member = interaction.guild.get_member(interaction.user.id)
-        # Temporarily disable permission check for testing
-        # if not member or not member.guild_permissions.manage_events:
-        #     await interaction.response.send_message(
-        #         "❌ You need 'Manage Events' permission to use this command.",
-        #         ephemeral=True
-        #     )
-        #     return
 
         await interaction.response.defer()
 
