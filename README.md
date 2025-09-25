@@ -88,7 +88,7 @@ A Python bot that automatically starts Discord scheduled voice events at their s
 source .venv/bin/activate
 
 # Run the bot
-python main.py
+uv rn main.py
 ```
 
 ### Slash Commands
