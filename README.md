@@ -31,9 +31,6 @@ A Python bot that automatically starts Discord scheduled voice events at their s
    ```bash
    # Using uv (recommended)
    uv sync
-
-   # Or using pip
-   pip install -r requirements.txt
    ```
 
 3. **Set up environment variables:**
