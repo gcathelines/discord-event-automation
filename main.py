@@ -37,6 +37,7 @@ class VoiceEventBot(commands.Bot):
         intents.guild_scheduled_events = True
 
         super().__init__(
+            command_prefix='!',
             intents=intents,
             help_command=None
         )
