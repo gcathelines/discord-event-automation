@@ -16,6 +16,7 @@ import discord
 from discord.ext import commands
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.date import DateTrigger
+from apscheduler.triggers.cron import CronTrigger
 from apscheduler.events import EVENT_JOB_EXECUTED, EVENT_JOB_ERROR
 from dotenv import load_dotenv
 
@@ -68,6 +69,15 @@ class VoiceEventBot(commands.Bot):
         # Start scheduler
         self.scheduler.start()
         logger.info("Scheduler started with event loop")
+
+        # Schedule automatic event sync every 15 minutes
+        self.scheduler.add_job(
+            self.auto_sync_events,
+            CronTrigger(minute='*/15'),  # Every 15 minutes
+            id="auto_sync_events",
+            replace_existing=True
+        )
+        logger.info("Scheduled automatic event sync every 15 minutes")
 
         # Sync slash commands
         await self.tree.sync()
@@ -144,8 +154,10 @@ class VoiceEventBot(commands.Bot):
 
     async def sync_voice_events(self) -> int:
         """Sync all voice events and create cron jobs"""
-        # Clear existing jobs
-        self.scheduler.remove_all_jobs()
+        # Clear existing event jobs (but keep auto_sync_events job)
+        for job in self.scheduler.get_jobs():
+            if job.id != "auto_sync_events":
+                self.scheduler.remove_job(job.id)
 
         voice_events = await self.get_voice_events()
         scheduled_count = 0
@@ -175,6 +187,17 @@ class VoiceEventBot(commands.Bot):
 
         logger.info(f"Synced {scheduled_count} voice events")
         return scheduled_count
+
+    async def auto_sync_events(self):
+        """Automatically sync events every 15 minutes"""
+        try:
+            logger.info("🔄 Running automatic event sync...")
+            count = await self.sync_voice_events()
+            logger.info(f"✅ Auto-sync completed: {count} events scheduled")
+        except Exception as e:
+            logger.error(f"❌ Auto-sync failed: {e}")
+            import traceback
+            logger.error(traceback.format_exc())
 
     def _job_executed(self, event):
         """Scheduler job executed listener"""
@@ -229,7 +252,7 @@ class VoiceEventBot(commands.Bot):
     async def sync_events_command(self, interaction: discord.Interaction):
         """Slash command to sync events"""
 
-        await interaction.response.defer()
+        await interaction.response.defer(thinking=True)
 
         try:
             count = await self.sync_voice_events()
@@ -264,7 +287,7 @@ class VoiceEventBot(commands.Bot):
 
     async def list_scheduled_command(self, interaction: discord.Interaction):
         """List all scheduled voice events"""
-        await interaction.response.defer()
+        await interaction.response.defer(thinking=True)
 
         try:
             voice_events = await self.get_voice_events()
@@ -312,7 +335,7 @@ class VoiceEventBot(commands.Bot):
     async def start_event_command(self, interaction: discord.Interaction, event_id: str):
         """Manually start an event"""
 
-        await interaction.response.defer()
+        await interaction.response.defer(thinking=True)
 
         try:
             event_id_int = int(event_id)
@@ -333,6 +356,8 @@ class VoiceEventBot(commands.Bot):
 
     async def bot_status_command(self, interaction: discord.Interaction):
         """Show bot status"""
+        await interaction.response.defer(thinking=True)
+
         jobs = self.scheduler.get_jobs()
 
         embed = discord.Embed(
@@ -354,7 +379,7 @@ class VoiceEventBot(commands.Bot):
                 inline=True
             )
 
-        await interaction.response.send_message(embed=embed)
+        await interaction.followup.send(embed=embed)
 
 async def main():
     """Main function to run the bot"""
