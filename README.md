@@ -120,7 +120,6 @@ The bot provides several slash commands:
 ```
 discord-event-automation/
 ├── main.py              # Main bot application
-├── config.yaml          # Configuration file (currently unused)
 ├── .env                 # Environment variables (create from .env.example)
 ├── .env.example         # Environment template
 ├── pyproject.toml       # Python project configuration
